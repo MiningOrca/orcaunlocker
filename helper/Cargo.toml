@@ -1,0 +1,23 @@
+[package]
+name = "miningorca-steam-helper"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+steam-vdf-parser = "0.1.2"
+steamlocate = "2.1.1"
+
+[profile.release]
+# The helper is bundled with the launcher and is short-lived. Prefer a compact
+# production binary without sacrificing parser performance as aggressively as
+# opt-level = "z" would.
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

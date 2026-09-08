@@ -1,0 +1,32 @@
+{
+  "store": {
+    "appDetailsURL": "https://store.steampowered.com/api/appdetails",
+    "language": "english",
+    "cacheTTLSeconds": 3600,
+    "requestTimeoutSeconds": 7,
+    "maxConcurrentRequests": 6,
+    "userAgent": "MiningOrcaLauncher"
+  },
+  "cache": {
+    "directoryName": "MiningOrca/dlc",
+    "artworkDirectoryName": "MiningOrca/artwork"
+  },
+  "helper": {
+    "executablePath": null
+  },
+  "runtime": {
+    "developmentDirectory": null,
+    "bundledDirectoryName": "Runtime",
+    "installDirectoryName": ".orcaunlocker",
+    "configFileName": "orcaunlocker.conf",
+    "logFileName": "orcaunlocker.log"
+  },
+  "steam": {
+    "restartTimeoutSeconds": 20,
+    "restartPollIntervalSeconds": 0.25
+  },
+  "diagnostics": {
+    "logTailLines": 200,
+    "maxLogBytes": 131072
+  }
+}

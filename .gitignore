@@ -1,0 +1,7 @@
+.DS_Store
+._*
+__MACOSX/
+.build/
+.swiftpm/
+helper/target/
+.idea/
