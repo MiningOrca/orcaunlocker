@@ -158,12 +158,32 @@ private struct BannerMediaPlaceholder: View {
             endPoint: .leading
         )
         .overlay(alignment: .trailing) {
-            Image(systemName: "wave.3.right")
-                .font(.system(size: 120, weight: .ultraLight))
-                .foregroundStyle(.quaternary)
-                .padding(.trailing, 44)
+            if let image = BannerArtwork.image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 540, height: 160)
+                    .clipped()
+                    .opacity(0.55)
+                    .padding(.trailing, 180)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
         }
     }
+}
+
+private enum BannerArtwork {
+    static let image: NSImage? = {
+        if let url = Bundle.main.url(forResource: "orca_banner", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            return image
+        }
+
+        let developmentURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("icons/orca_banner.png", isDirectory: false)
+        return NSImage(contentsOf: developmentURL)
+    }()
 }
 
 private struct GameArtwork: View {
