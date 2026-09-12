@@ -1,15 +1,23 @@
 name: Release
 
 on:
+  push:
+    branches:
+      - ci
+
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version, e.g. 0.1.0"
-        required: true
+      runtime_tag:
+        description: "Exact Mineshaft runtime tag, e.g. v1.7.0. Leave empty for a launcher-only release."
+        required: false
         type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: launcher-release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -19,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Show toolchains
         shell: bash
@@ -30,21 +40,117 @@ jobs:
           cargo --version
           gh --version
 
-      - name: Prepare release version
+      - name: Determine runtime and launcher version
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.MINESHAFT_READ_TOKEN }}
+          REQUESTED_RUNTIME_TAG: ${{ inputs.runtime_tag }}
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${{ inputs.version }}"
-          VERSION="${VERSION#v}"
+          git fetch --force --tags
 
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
-            echo "Invalid version: $VERSION" >&2
-            echo "Expected something like: 0.1.0" >&2
+          # Version scheme:
+          #   1.L.R
+          #
+          #   1 = fixed major version
+          #   L = runtime/library revision
+          #   R = launcher revision
+          #
+          # Runtime-triggered release:
+          #   exact runtime v1.L.0 -> launcher v1.L.0
+          #
+          # Launcher push/manual release:
+          #   same runtime L -> increment R
+
+          if [[ -n "${REQUESTED_RUNTIME_TAG:-}" ]]; then
+            RUNTIME_TAG="$REQUESTED_RUNTIME_TAG"
+
+            if [[ "$RUNTIME_TAG" != v* ]]; then
+              RUNTIME_TAG="v$RUNTIME_TAG"
+            fi
+
+            RELEASE_KIND="runtime"
+          else
+            RUNTIME_TAG="$(
+              gh release view \
+                --repo MiningOrca/orcaunlocker-mineshaft \
+                --json tagName \
+                --jq '.tagName'
+            )"
+
+            if [[ -z "$RUNTIME_TAG" ]]; then
+              echo "Could not determine latest Mineshaft release." >&2
+              exit 1
+            fi
+
+            RELEASE_KIND="launcher"
+          fi
+
+          if [[ ! "$RUNTIME_TAG" =~ ^v1\.([0-9]+)\.0$ ]]; then
+            echo "Invalid runtime tag: $RUNTIME_TAG" >&2
+            echo "Expected runtime version format: v1.L.0" >&2
             exit 1
           fi
 
+          LIB_REV="${BASH_REMATCH[1]}"
+
+          # Make sure the requested/existing runtime release is real.
+          gh release view "$RUNTIME_TAG" \
+            --repo MiningOrca/orcaunlocker-mineshaft \
+            >/dev/null
+
+          if [[ "$RELEASE_KIND" == "runtime" ]]; then
+            # A new runtime defines a new library revision and resets
+            # launcher revision to zero.
+            LAUNCHER_REV=0
+          else
+            # A launcher-only release increments the third component.
+            CURRENT_TAG="$(
+              git tag \
+                --list 'v1.[0-9]*.[0-9]*' \
+                --sort=-version:refname \
+                | head -n 1
+            )"
+
+            if [[ -z "$CURRENT_TAG" ]]; then
+              CURRENT_LIB_REV=0
+              CURRENT_LAUNCHER_REV=0
+            else
+              CURRENT_VERSION="${CURRENT_TAG#v}"
+              IFS='.' read -r CURRENT_MAJOR CURRENT_LIB_REV CURRENT_LAUNCHER_REV \
+                <<< "$CURRENT_VERSION"
+
+              if [[ "$CURRENT_MAJOR" != "1" ]]; then
+                echo "Unexpected launcher major version: $CURRENT_TAG" >&2
+                exit 1
+              fi
+
+              if [[ ! "$CURRENT_LIB_REV" =~ ^[0-9]+$ || \
+                    ! "$CURRENT_LAUNCHER_REV" =~ ^[0-9]+$ ]]; then
+                echo "Invalid launcher tag: $CURRENT_TAG" >&2
+                exit 1
+              fi
+            fi
+
+            if (( CURRENT_LIB_REV > LIB_REV )); then
+              echo "Launcher tag is ahead of the latest runtime." >&2
+              echo "Launcher: ${CURRENT_TAG:-none}" >&2
+              echo "Runtime:  $RUNTIME_TAG" >&2
+              exit 1
+            fi
+
+            if (( CURRENT_LIB_REV == LIB_REV )); then
+              LAUNCHER_REV=$((CURRENT_LAUNCHER_REV + 1))
+            else
+              # Runtime advanced but its automatic launcher release did not
+              # exist yet. This is still a launcher change, so start at .1.
+              LAUNCHER_REV=1
+            fi
+          fi
+
+          VERSION="1.${LIB_REV}.${LAUNCHER_REV}"
           TAG="v$VERSION"
 
           if git ls-remote \
@@ -56,16 +162,21 @@ jobs:
             exit 1
           fi
 
+          echo "Release kind: $RELEASE_KIND"
+          echo "Runtime tag: $RUNTIME_TAG"
+          echo "Launcher version: $VERSION"
+          echo "Launcher tag: $TAG"
+
+          echo "release_kind=$RELEASE_KIND" >> "$GITHUB_OUTPUT"
+          echo "runtime_tag=$RUNTIME_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          echo "Release version: $VERSION"
-          echo "Release tag: $TAG"
-
-      - name: Download latest Mineshaft release
+      - name: Download Mineshaft release
         id: mineshaft
         env:
           GH_TOKEN: ${{ secrets.MINESHAFT_READ_TOKEN }}
+          MINESHAFT_TAG: ${{ steps.version.outputs.runtime_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -75,18 +186,6 @@ jobs:
 
           rm -rf "$RELEASE_DIR" "$UNPACK_DIR"
           mkdir -p "$RELEASE_DIR" "$UNPACK_DIR"
-
-          MINESHAFT_TAG="$(
-            gh release view \
-              --repo MiningOrca/orcaunlocker-mineshaft \
-              --json tagName \
-              --jq '.tagName'
-          )"
-
-          if [[ -z "$MINESHAFT_TAG" ]]; then
-            echo "Could not determine latest Mineshaft release." >&2
-            exit 1
-          fi
 
           echo "Using Mineshaft release: $MINESHAFT_TAG"
 
@@ -143,9 +242,9 @@ jobs:
             find "$UNPACK_DIR" \
               -type f \
               -name manifest.json \
-              -print |
-              wc -l |
-              tr -d ' '
+              -print \
+              | wc -l \
+              | tr -d ' '
           )"
 
           if [[ "$MANIFEST_COUNT" != "1" ]]; then
@@ -158,8 +257,8 @@ jobs:
             find "$UNPACK_DIR" \
               -type f \
               -name manifest.json \
-              -print |
-              head -n 1
+              -print \
+              | head -n 1
           )"
 
           RUNTIME_DIR="$(dirname "$MANIFEST")"
@@ -257,11 +356,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           MINESHAFT_TAG: ${{ steps.mineshaft.outputs.tag }}
+          RELEASE_KIND: ${{ steps.version.outputs.release_kind }}
         shell: bash
         run: |
           {
             echo "## Orca Unlocker $RELEASE_TAG"
             echo
+            echo "- Release kind: \`$RELEASE_KIND\`"
             echo "- Launcher commit: \`$GITHUB_SHA\`"
             echo "- Mineshaft runtime: \`$MINESHAFT_TAG\`"
             echo "- Build: \`${{ github.run_number }}\`"
