@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchains
+        run: |
+          swift --version
+          rustc --version
+          cargo --version
+
+      - name: Download latest Mineshaft release
+        id: mineshaft
+        env:
+          GH_TOKEN: ${{ secrets.MINESHAFT_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_DIR="$RUNNER_TEMP/mineshaft-release"
+          UNPACK_DIR="$RUNNER_TEMP/mineshaft-unpacked"
+
+          mkdir -p "$RELEASE_DIR" "$UNPACK_DIR"
+
+          TAG="$(
+            gh release view \
+              --repo MiningOrca/orcaunlocker-mineshaft \
+              --json tagName \
+              --jq '.tagName'
+          )"
+
+          echo "Using Mineshaft release: $TAG"
+
+          gh release download "$TAG" \
+            --repo MiningOrca/orcaunlocker-mineshaft \
+            --dir "$RELEASE_DIR"
+
+          echo "Downloaded assets:"
+          find "$RELEASE_DIR" -maxdepth 1 -type f -print
+
+          # Support both archived runtime bundles and raw release assets.
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              *.zip)
+                echo "Extracting ZIP: $file"
+                /usr/bin/ditto -x -k "$file" "$UNPACK_DIR"
+                ;;
+
+              *.tar.gz|*.tgz)
+                echo "Extracting tarball: $file"
+                /usr/bin/tar -xzf "$file" -C "$UNPACK_DIR"
+                ;;
+
+              *)
+                cp "$file" "$UNPACK_DIR/"
+                ;;
+            esac
+          done < <(find "$RELEASE_DIR" -maxdepth 1 -type f -print0)
+
+          mapfile -t manifests < <(
+            find "$UNPACK_DIR" -type f -name manifest.json -print
+          )
+
+          if [[ "${#manifests[@]}" -ne 1 ]]; then
+            echo "Expected exactly one runtime manifest.json, found ${#manifests[@]}:" >&2
+            printf '%s\n' "${manifests[@]}" >&2
+            echo >&2
+            echo "Unpacked contents:" >&2
+            find "$UNPACK_DIR" -maxdepth 4 -print >&2
+            exit 1
+          fi
+
+          RUNTIME_DIR="$(dirname "${manifests[0]}")"
+
+          echo "Runtime directory: $RUNTIME_DIR"
+          find "$RUNTIME_DIR" -maxdepth 2 -type f -print
+
+          echo "runtime_dir=$RUNTIME_DIR" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build Orca Unlocker
+        env:
+          ORCAUNLOCKER_RUNTIME_DIR: ${{ steps.mineshaft.outputs.runtime_dir }}
+          ORCAUNLOCKER_BUILD: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          export ORCAUNLOCKER_VERSION="$VERSION"
+
+          echo "Launcher version: $ORCAUNLOCKER_VERSION"
+          echo "Build number: $ORCAUNLOCKER_BUILD"
+          echo "Mineshaft: ${{ steps.mineshaft.outputs.tag }}"
+
+          ./scripts/build-app.sh
+
+      - name: Verify release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="dist/Orca Unlocker.app"
+          ZIP="dist/Orca-Unlocker-macOS.zip"
+
+          test -d "$APP"
+          test -f "$ZIP"
+
+          /usr/bin/plutil -lint "$APP/Contents/Info.plist"
+
+          /usr/bin/codesign \
+            --verify \
+            --strict \
+            "$APP"
+
+          test -f "$APP/Contents/Resources/Runtime/manifest.json"
+
+          echo "Bundle version:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleShortVersionString" \
+            "$APP/Contents/Info.plist"
+
+          shasum -a 256 "$ZIP" > "$ZIP.sha256"
+
+          echo
+          ls -lh "$ZIP" "$ZIP.sha256"
+          cat "$ZIP.sha256"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/Orca-Unlocker-macOS.zip" \
+            "dist/Orca-Unlocker-macOS.zip.sha256" \
+            --verify-tag \
+            --generate-notes \
+            --title "Orca Unlocker $GITHUB_REF_NAME"
