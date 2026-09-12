@@ -4,6 +4,7 @@ package struct DebugProcessIdentity: Hashable, Sendable {
     package let pid: Int32
     package let ppid: Int32
     package let command: String
+    package let executable: String?
 }
 
 package struct DebugProcessObservation: Hashable, Sendable {

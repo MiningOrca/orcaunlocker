@@ -98,7 +98,7 @@ enum DebugSessionSupport {
         runtimeSettings: LauncherSettings.Runtime,
         fileSystem: FileSystem = .default
     ) -> DebugProcessObservation {
-        let executable = processExecutable(pid: identity.pid)
+        let executable = identity.executable ?? processExecutable(pid: identity.pid)
         let binaryArchitectures = executable.map(binaryArchitectures) ?? []
         let architecture = processArchitecture(
             pid: identity.pid,
@@ -168,7 +168,12 @@ enum DebugSessionSupport {
                 guard prefixes.contains(where: { command.contains($0) }) else {
                     return nil
                 }
-                return DebugProcessIdentity(pid: pid, ppid: ppid, command: command)
+                return DebugProcessIdentity(
+                    pid: pid,
+                    ppid: ppid,
+                    command: command,
+                    executable: processExecutable(pid: pid)
+                )
             }
     }
 

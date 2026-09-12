@@ -1046,7 +1046,7 @@ final class LauncherAppModel: ObservableObject {
         var previousGameProcessRunning: Bool?
         var previousLogFingerprint: DebugLogFingerprint?
         var lastLogActivity = Date()
-        var observedPIDs = Set<Int32>()
+        var observedProcessIdentities = Set<DebugProcessIdentity>()
         var processObservations: [DebugProcessObservation] = []
 
         while !Task.isCancelled {
@@ -1058,7 +1058,9 @@ final class LauncherAppModel: ObservableObject {
                 try LauncherCore.load().debugSessionPulse(game: game)
             }.value
 
-            for identity in pulse.processes where observedPIDs.insert(identity.pid).inserted {
+            // A process can exec() a different image without changing PID (Civ V does this).
+            // Track command + resolved executable so a changed process image is inspected again.
+            for identity in pulse.processes where observedProcessIdentities.insert(identity).inserted {
                 let observation = try await Task.detached(priority: .utility) {
                    try LauncherCore.load().inspectDebugProcess(
                         identity,

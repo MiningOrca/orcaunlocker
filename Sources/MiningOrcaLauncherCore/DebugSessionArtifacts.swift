@@ -435,9 +435,18 @@ enum DebugSessionArtifacts {
         observations: [DebugProcessObservation]
     ) -> DebugProcessObservation? {
         let installPrefix = game.installDirectory.standardizedFileURL.path + "/"
-        return observations.max { lhs, rhs in
-            processScore(lhs, installPrefix: installPrefix) < processScore(rhs, installPrefix: installPrefix)
+        var best: (score: Int, index: Int, observation: DebugProcessObservation)?
+
+        for (index, observation) in observations.enumerated() {
+            let score = processScore(observation, installPrefix: installPrefix)
+            if best == nil || score > best!.score || (score == best!.score && index > best!.index) {
+                best = (score, index, observation)
+            }
         }
+
+        // Prefer the latest equally-good observation. This matters when one PID
+        // execs from a launcher image into the real game executable.
+        return best?.observation
     }
 
     private static func processScore(
