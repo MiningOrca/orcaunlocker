@@ -93,9 +93,9 @@ enum LowViolenceDraft: CaseIterable, Identifiable {
 
     init(_ value: Bool?) {
         switch value {
-        case true:
+        case true?:
             self = .enabled
-        case false:
+        case false?:
             self = .disabled
         case nil:
             self = .valve

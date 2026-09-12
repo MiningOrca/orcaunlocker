@@ -384,8 +384,8 @@ private struct OverviewCard<Content: View>: View {
 
 private func lowViolenceText(_ value: Bool?) -> String {
     switch value {
-    case true: return AppText.Common.on
-    case false: return AppText.Common.off
+    case true?: return AppText.Common.on
+    case false?: return AppText.Common.off
     case nil: return AppText.Common.valveDefault
     }
 }

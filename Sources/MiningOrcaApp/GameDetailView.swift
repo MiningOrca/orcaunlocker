@@ -68,42 +68,50 @@ private struct CommitTextEditingOnOutsideClick: NSViewRepresentable {
         coordinator.removeMonitor()
     }
 
-    final class Coordinator {
-        weak var hostView: NSView?
-        private var monitor: Any?
+@MainActor
+final class Coordinator {
+    weak var hostView: NSView?
+    private var monitor: Any?
 
-        func installMonitor() {
-            guard monitor == nil else {
-                return
-            }
+    func installMonitor() {
+        guard monitor == nil else {
+            return
+        }
 
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-                guard let window = self?.hostView?.window,
-                      event.window === window,
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            let eventWindowNumber = event.windowNumber
+            let locationInWindow = event.locationInWindow
+
+            MainActor.assumeIsolated {
+                guard let self,
+                      let window = self.hostView?.window,
+                      window.windowNumber == eventWindowNumber,
                       let fieldEditor = window.firstResponder as? NSTextView,
                       fieldEditor.isFieldEditor,
                       let textField = fieldEditor.delegate as? NSTextField else {
-                    return event
+                    return
                 }
 
-                let point = textField.convert(event.locationInWindow, from: nil)
+                let point = textField.convert(locationInWindow, from: nil)
+
                 guard !textField.bounds.contains(point) else {
-                    return event
+                    return
                 }
 
                 _ = window.makeFirstResponder(nil)
-                return event
             }
-        }
 
-        func removeMonitor() {
-            if let monitor {
-                NSEvent.removeMonitor(monitor)
-                self.monitor = nil
-            }
+            return event
         }
     }
-}
+
+    func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+}}
 
 private struct GameBannerHeader: View {
     let game: SteamGame
@@ -172,7 +180,7 @@ private struct BannerMediaPlaceholder: View {
         }
     }
 }
-
+@MainActor
 private enum BannerArtwork {
     static let image: NSImage? = {
         if let url = Bundle.main.url(forResource: "orca_banner", withExtension: "png"),
