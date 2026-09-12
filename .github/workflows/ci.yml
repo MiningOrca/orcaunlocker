@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - ci
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          swift --version
+          rustc --version
+          cargo --version
+
+      - name: Check shell scripts
+        run: |
+          bash -n scripts/*.sh
+
+      - name: Build Rust helper
+        run: |
+          ./scripts/build-helper.sh
+
+      - name: Build launcher
+        run: |
+          swift build \
+            -c release \
+            --product OrcaUnlockerApp
