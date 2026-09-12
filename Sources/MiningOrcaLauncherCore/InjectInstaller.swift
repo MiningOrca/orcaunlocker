@@ -235,7 +235,7 @@ struct InjectInstaller {
             for url in gamePaths.injectRuntimeFiles {
                 try? fileSystem.removeItem(at: url)
             }
-            try? fileSystem.removeDirectoryIfEmpty(gamePaths.runtimeDirectory)
+            _ = try? fileSystem.removeDirectoryIfEmpty(gamePaths.runtimeDirectory)
             throw error
         }
     }

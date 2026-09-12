@@ -423,9 +423,9 @@ enum DebugSessionArtifacts {
 
     private static func yesNoUnknown(_ value: Bool?) -> String {
         switch value {
-        case true: return "yes"
-        case false: return "no"
-        case nil: return "unknown"
+            case true: return "yes"
+            case false: return "no"
+            case nil: return "unknown"
         }
     }
 
