@@ -217,20 +217,26 @@ enum LauncherSettingsLoader {
     }
 
     private static func loadBundledDefaults(fileSystem: FileSystem) throws -> LauncherSettings {
-        guard let url = Bundle.module.url(forResource: "default-settings", withExtension: "json") else {
-            throw LauncherSettingsError.bundledDefaultsMissing
-        }
-
-        do {
-            let settings = try JSONDecoder().decode(LauncherSettings.self, from: fileSystem.readData(from: url))
-            try validate(settings)
-            return settings
-        } catch let error as LauncherSettingsError {
-            throw error
-        } catch {
-            throw LauncherSettingsError.invalidBundledDefaults(error.localizedDescription)
-        }
+    guard let url =
+        Bundle.main.url(forResource: "default-settings", withExtension: "json")
+        ?? Bundle.module.url(forResource: "default-settings", withExtension: "json")
+    else {
+        throw LauncherSettingsError.bundledDefaultsMissing
     }
+
+    do {
+        let settings = try JSONDecoder().decode(
+            LauncherSettings.self,
+            from: fileSystem.readData(from: url)
+        )
+        try validate(settings)
+        return settings
+    } catch let error as LauncherSettingsError {
+        throw error
+    } catch {
+        throw LauncherSettingsError.invalidBundledDefaults(error.localizedDescription)
+    }
+}
 
     private static func apply(_ overrides: Overrides, to defaults: LauncherSettings) -> LauncherSettings {
         var settings = defaults
