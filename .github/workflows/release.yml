@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       runtime_tag:
-        description: "Exact Mineshaft runtime tag. Set by the runtime workflow."
+        description: "Exact Mineshaft runtime tag, e.g. v9"
         required: false
         type: string
 
@@ -57,17 +57,6 @@ jobs:
 
           git fetch --force --tags
 
-          # Launcher version scheme:
-          #
-          #   1.L.R
-          #
-          #   1 = fixed
-          #   L = launcher generation for runtime/library changes
-          #   R = launcher-only revision
-          #
-          # A runtime-triggered build increments L and resets R to 0.
-          # A normal launcher push keeps L and increments R.
-
           CURRENT_TAG="$(
             git tag \
               --list 'v1.[0-9]*.[0-9]*' \
@@ -90,11 +79,16 @@ jobs:
           fi
 
           if [[ -n "${REQUESTED_RUNTIME_TAG:-}" ]]; then
-            RUNTIME_TAG="$REQUESTED_RUNTIME_TAG"
             RELEASE_KIND="runtime"
+            RUNTIME_TAG="$REQUESTED_RUNTIME_TAG"
 
-            # Do not infer or rewrite the Mineshaft version.
-            # It has its own independent version line.
+            if [[ ! "$RUNTIME_TAG" =~ ^v[0-9]+$ ]]; then
+              echo "Invalid runtime tag: $RUNTIME_TAG" >&2
+              echo "Expected format: v8, v9, v10, ..." >&2
+              exit 1
+            fi
+
+            # Verify that the exact runtime release exists.
             gh release view "$RUNTIME_TAG" \
               --repo MiningOrca/orcaunlocker-mineshaft \
               >/dev/null
