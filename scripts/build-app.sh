@@ -64,6 +64,7 @@ swift build -c release --product OrcaUnlockerApp
 BIN_DIR="$(swift build -c release --show-bin-path)"
 APP_EXECUTABLE="$BIN_DIR/OrcaUnlockerApp"
 HELPER_EXECUTABLE="$ROOT/helper/target/release/miningorca-steam-helper"
+CORE_RESOURCES="$BIN_DIR/MiningOrcaLauncher_MiningOrcaLauncherCore.bundle"
 
 if [[ ! -x "$APP_EXECUTABLE" ]]; then
   echo "App executable is missing: $APP_EXECUTABLE" >&2
@@ -72,6 +73,11 @@ fi
 
 if [[ ! -x "$HELPER_EXECUTABLE" ]]; then
   echo "Steam helper is missing: $HELPER_EXECUTABLE" >&2
+  exit 1
+fi
+
+if [[ ! -d "$CORE_RESOURCES" ]]; then
+  echo "SwiftPM resource bundle is missing: $CORE_RESOURCES" >&2
   exit 1
 fi
 
@@ -112,6 +118,7 @@ rm -rf "$ICONSET"
 
 cp "$APP_EXECUTABLE" "$APP/Contents/MacOS/OrcaUnlocker"
 cp "$HELPER_EXECUTABLE" "$APP/Contents/MacOS/miningorca-steam-helper"
+cp -R "$CORE_RESOURCES" "$APP/"
 cp \
   "$ROOT/Sources/MiningOrcaLauncherCore/Resources/default-settings.json" \
   "$APP/Contents/Resources/default-settings.json"
