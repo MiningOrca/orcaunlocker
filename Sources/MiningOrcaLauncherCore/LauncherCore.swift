@@ -740,7 +740,7 @@ package struct LauncherCore {
     package func clearDebugRuntimeLog(game: SteamGame) throws {
         try LauncherLog.withAppID(game.appID) {
             LauncherLog.logger.info(
-                "Clearing runtime log before debug launch",
+                "Clearing runtime and debug trace logs before debug launch",
                 metadata: ["app_id": "\(game.appID)"]
             )
             try DebugSessionSupport.clearRuntimeLog(
@@ -771,11 +771,28 @@ package struct LauncherCore {
         }
     }
 
+    package func inspectDebugProcess(
+        _ identity: DebugProcessIdentity,
+        game: SteamGame,
+        steamAPITargets: [URL]
+    ) -> DebugProcessObservation {
+        LauncherLog.suppressCollection {
+            DebugSessionSupport.inspectProcess(
+                identity,
+                game: game,
+                steamAPITargets: steamAPITargets,
+                runtimeSettings: settings.runtime,
+                fileSystem: fileSystem
+            )
+        }
+    }
+
     package func captureDebugArtifacts(
         game: SteamGame,
         installLog: String,
         transport: SteamTransport,
-        debugState: LauncherGameState
+        debugState: LauncherGameState,
+        processObservations: [DebugProcessObservation]
     ) throws -> DebugArtifactCapture {
         try LauncherLog.withAppID(game.appID) {
             let capture = try DebugSessionArtifacts.capture(
@@ -783,6 +800,7 @@ package struct LauncherCore {
                 installLog: installLog,
                 transport: transport,
                 debugState: debugState,
+                processObservations: processObservations,
                 runtimeSettings: settings.runtime,
                 fileSystem: fileSystem
             )

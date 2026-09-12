@@ -33,6 +33,18 @@ struct RuntimeGamePaths: Sendable {
         [injectDylib, injectPrefixWrapper, injectCommandWrapper]
     }
 
+    var injectLaunchTrace: URL {
+        runtimeDirectory.appendingPathComponent("launch-trace.log", isDirectory: false)
+    }
+
+    var earlyRuntimeLog: URL {
+        runtimeDirectory.appendingPathComponent("runtime-early.log", isDirectory: false)
+    }
+
+    var debugTraceFiles: [URL] {
+        [injectLaunchTrace, earlyRuntimeLog]
+    }
+
     var config: URL {
         runtimeDirectory.appendingPathComponent(runtimeSettings.configFileName, isDirectory: false)
     }

@@ -9,6 +9,7 @@ enum DebugSessionArtifacts {
         installLog: String,
         transport: SteamTransport,
         debugState: LauncherGameState,
+        processObservations: [DebugProcessObservation],
         runtimeSettings: LauncherSettings.Runtime,
         fileSystem: FileSystem = .default
     ) throws -> DebugArtifactCapture {
@@ -46,6 +47,34 @@ enum DebugSessionArtifacts {
                 capturedLog = nil
             }
 
+            let capturedEarlyRuntimeLog = try captureOptionalTextFile(
+                source: gamePaths.earlyRuntimeLog,
+                destinationName: "runtime-early.log",
+                gamePaths: gamePaths,
+                directory: directory,
+                fileSystem: fileSystem
+            )
+            let capturedLaunchTrace = try captureOptionalTextFile(
+                source: gamePaths.injectLaunchTrace,
+                destinationName: "launch-trace.log",
+                gamePaths: gamePaths,
+                directory: directory,
+                fileSystem: fileSystem
+            )
+
+            let capturedProcessTrace: URL?
+            if processObservations.isEmpty {
+                capturedProcessTrace = nil
+            } else {
+                let destination = directory.appendingPathComponent("processes.txt", isDirectory: false)
+                try writeRedacted(
+                    processTraceText(processObservations),
+                    to: destination,
+                    fileSystem: fileSystem
+                )
+                capturedProcessTrace = destination
+            }
+
             let sourceConfig = gamePaths.config
             try gamePaths.requireSafeRuntimePath(sourceConfig, fileSystem: fileSystem)
             let capturedConfig: URL?
@@ -58,6 +87,9 @@ enum DebugSessionArtifacts {
             }
 
             let runtimeObservation = capturedLog.flatMap { DebugSessionArtifacts.runtimeObservation(from: $0, fileSystem: fileSystem) }
+            let processObservation = bestProcessObservation(game: game, observations: processObservations)
+            let observedArchitecture = runtimeObservation?.architecture ?? processObservation?.architecture
+            let observedExecutable = runtimeObservation?.executable ?? processObservation?.executable
             let hardwareArchitecture = hardwareArchitecture()
             let launcherArchitecture = launcherArchitecture()
             let launcherTranslatedByRosetta = launcherTranslatedByRosetta()
@@ -75,7 +107,11 @@ enum DebugSessionArtifacts {
                     hardwareArchitecture: hardwareArchitecture,
                     launcherArchitecture: launcherArchitecture,
                     launcherTranslatedByRosetta: launcherTranslatedByRosetta,
-                    runtimeObservation: runtimeObservation,
+                    runtimeObservation: RuntimeObservation(
+                        architecture: observedArchitecture,
+                        executable: observedExecutable
+                    ),
+                    processObservation: processObservation,
                     debugRuntimeArchitectures: runtimeArchitectures
                 ),
                 to: systemURL,
@@ -113,12 +149,20 @@ enum DebugSessionArtifacts {
                 archiveURL: archiveURL,
                 installLogURL: installLogURL,
                 runtimeLogURL: capturedLog,
+                earlyRuntimeLogURL: capturedEarlyRuntimeLog,
+                launchTraceURL: capturedLaunchTrace,
+                processTraceURL: capturedProcessTrace,
                 configurationURL: capturedConfig,
                 hardwareArchitecture: hardwareArchitecture,
                 launcherArchitecture: launcherArchitecture,
                 launcherTranslatedByRosetta: launcherTranslatedByRosetta,
-                observedRuntimeArchitecture: runtimeObservation?.architecture,
-                observedExecutable: runtimeObservation?.executable,
+                observedRuntimeArchitecture: observedArchitecture,
+                observedExecutable: observedExecutable,
+                observedProcessPID: processObservation?.pid,
+                observedProcessPPID: processObservation?.ppid,
+                observedTranslatedByRosetta: processObservation?.translatedByRosetta,
+                observedRuntimeLoaded: processObservation?.runtimeLoaded,
+                observedSteamAPIMappings: processObservation?.steamAPIMappings ?? [],
                 debugRuntimeArchitectures: runtimeArchitectures
             )
         } catch {
@@ -204,6 +248,9 @@ enum DebugSessionArtifacts {
             "  Launcher architecture: \(capture.launcherArchitecture)",
             "  Launcher translated by Rosetta: \(yesNoUnknown(capture.launcherTranslatedByRosetta))",
             "  Observed game process architecture: \(capture.observedRuntimeArchitecture ?? "unknown")",
+            "  Observed process PID: \(capture.observedProcessPID.map(String.init) ?? "unknown")",
+            "  Observed process PPID: \(capture.observedProcessPPID.map(String.init) ?? "unknown")",
+            "  Observed process translated by Rosetta: \(yesNoUnknown(capture.observedTranslatedByRosetta))",
             "  Debug runtime architectures: \(capture.debugRuntimeArchitectures.isEmpty ? "unknown" : capture.debugRuntimeArchitectures.joined(separator: ", "))",
         ]
 
@@ -212,6 +259,9 @@ enum DebugSessionArtifacts {
         }
 
         if context.transport == .inject {
+            lines.append("  Inject wrapper invoked: \(capture.launchTraceURL == nil ? "no" : "yes")")
+            lines.append("  orcaunlocker.dylib loaded in observed process: \(yesNoUnknown(capture.observedRuntimeLoaded))")
+            lines.append("  Early runtime marker log: \(capture.earlyRuntimeLogURL == nil ? "no" : "yes")")
             let hookedAccounts = context.debugState.states.compactMap(\.launchOptionsHookCount).max() ?? 0
             let localConfigCount = context.debugState.states.map { $0.localConfigURLs.count }.max() ?? 0
             if localConfigCount > 0 {
@@ -231,6 +281,9 @@ enum DebugSessionArtifacts {
             "Included artifacts",
             "  install.log: yes",
             "  runtime.log: \(capture.runtimeLogURL == nil ? "no" : "yes")",
+            "  runtime-early.log: \(capture.earlyRuntimeLogURL == nil ? "no" : "yes")",
+            "  launch-trace.log: \(capture.launchTraceURL == nil ? "no" : "yes")",
+            "  processes.txt: \(capture.processTraceURL == nil ? "no" : "yes")",
             "  orcaunlocker.conf: \(capture.configurationURL == nil ? "no" : "yes")",
             "  cleanup.log: yes",
             "  installation.json: yes",
@@ -259,7 +312,7 @@ enum DebugSessionArtifacts {
         capture: DebugArtifactCapture
     ) throws -> Data {
         let payload: [String: Any] = [
-            "schema_version": 1,
+            "schema_version": 2,
             "game": [
                 "name": game.name,
                 "app_id": game.appID,
@@ -279,6 +332,11 @@ enum DebugSessionArtifacts {
                 "launcher_translated_by_rosetta": jsonValue(capture.launcherTranslatedByRosetta),
                 "observed_game_process_architecture": jsonValue(capture.observedRuntimeArchitecture),
                 "observed_executable": jsonValue(capture.observedExecutable.map { DiagnosticPrivacy.redact($0) }),
+                "observed_process_pid": jsonValue(capture.observedProcessPID),
+                "observed_process_ppid": jsonValue(capture.observedProcessPPID),
+                "observed_process_translated_by_rosetta": jsonValue(capture.observedTranslatedByRosetta),
+                "observed_runtime_loaded": jsonValue(capture.observedRuntimeLoaded),
+                "observed_steam_api_mappings": capture.observedSteamAPIMappings.map { DiagnosticPrivacy.redact($0) },
                 "debug_runtime_architectures": capture.debugRuntimeArchitectures,
             ],
             "debug_installation": stateJSONObject(context.debugState),
@@ -330,6 +388,70 @@ enum DebugSessionArtifacts {
         return NSNull()
     }
 
+    private static func captureOptionalTextFile(
+        source: URL,
+        destinationName: String,
+        gamePaths: RuntimeGamePaths,
+        directory: URL,
+        fileSystem: FileSystem
+    ) throws -> URL? {
+        try gamePaths.requireSafeRuntimePath(source, fileSystem: fileSystem)
+        guard fileSystem.fileExists(atPath: source.path) else { return nil }
+        let destination = directory.appendingPathComponent(destinationName, isDirectory: false)
+        try copyRedactedText(from: source, to: destination, fileSystem: fileSystem)
+        return destination
+    }
+
+    private static func processTraceText(_ observations: [DebugProcessObservation]) -> String {
+        var lines: [String] = []
+        for observation in observations {
+            lines.append("PID: \(observation.pid)")
+            lines.append("PPID: \(observation.ppid)")
+            lines.append("Command: \(observation.command)")
+            lines.append("Executable: \(observation.executable ?? "unknown")")
+            lines.append("Active architecture: \(observation.architecture ?? "unknown")")
+            lines.append(
+                "Binary architectures: \(observation.binaryArchitectures.isEmpty ? "unknown" : observation.binaryArchitectures.joined(separator: ", "))"
+            )
+            lines.append("Translated by Rosetta: \(yesNoUnknown(observation.translatedByRosetta))")
+            lines.append("DYLD_INSERT_LIBRARIES present: \(yesNoUnknown(observation.dyldInsertLibrariesPresent))")
+            lines.append("orcaunlocker.dylib mapped: \(yesNoUnknown(observation.runtimeLoaded))")
+            if observation.steamAPIMappings.isEmpty {
+                lines.append("Steam API mappings: none observed")
+            } else {
+                lines.append("Steam API mappings:")
+                lines.append(contentsOf: observation.steamAPIMappings.map { "  \($0)" })
+            }
+            if let inspectionError = observation.inspectionError {
+                lines.append("Inspection warning: \(inspectionError)")
+            }
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func bestProcessObservation(
+        game: SteamGame,
+        observations: [DebugProcessObservation]
+    ) -> DebugProcessObservation? {
+        let installPrefix = game.installDirectory.standardizedFileURL.path + "/"
+        return observations.max { lhs, rhs in
+            processScore(lhs, installPrefix: installPrefix) < processScore(rhs, installPrefix: installPrefix)
+        }
+    }
+
+    private static func processScore(
+        _ observation: DebugProcessObservation,
+        installPrefix: String
+    ) -> Int {
+        var score = 0
+        if observation.executable?.hasPrefix(installPrefix) == true { score += 8 }
+        if !observation.steamAPIMappings.isEmpty { score += 4 }
+        if observation.runtimeLoaded == true { score += 2 }
+        if observation.architecture != nil { score += 1 }
+        return score
+    }
+
     private struct RuntimeObservation {
         let architecture: String?
         let executable: String?
@@ -340,6 +462,7 @@ enum DebugSessionArtifacts {
         launcherArchitecture: String,
         launcherTranslatedByRosetta: Bool?,
         runtimeObservation: RuntimeObservation?,
+        processObservation: DebugProcessObservation?,
         debugRuntimeArchitectures: [String]
     ) -> String {
         var sections: [String] = []
@@ -350,6 +473,18 @@ enum DebugSessionArtifacts {
         sections.append("Observed game process architecture\n\(runtimeObservation?.architecture ?? "unknown")")
         if let executable = runtimeObservation?.executable {
             sections.append("Observed game executable\n\(executable)")
+        }
+        if let processObservation {
+            sections.append("Observed PID / PPID\n\(processObservation.pid) / \(processObservation.ppid)")
+            sections.append("Observed process translated by Rosetta\n\(yesNoUnknown(processObservation.translatedByRosetta))")
+            sections.append("DYLD_INSERT_LIBRARIES visible in process environment\n\(yesNoUnknown(processObservation.dyldInsertLibrariesPresent))")
+            sections.append("orcaunlocker.dylib mapped\n\(yesNoUnknown(processObservation.runtimeLoaded))")
+            if !processObservation.steamAPIMappings.isEmpty {
+                sections.append("Steam API mappings\n\(processObservation.steamAPIMappings.joined(separator: "\n"))")
+            }
+            if let inspectionError = processObservation.inspectionError {
+                sections.append("Process inspection warning\n\(inspectionError)")
+            }
         }
         sections.append(
             "Debug runtime architectures\n\(debugRuntimeArchitectures.isEmpty ? "unknown" : debugRuntimeArchitectures.joined(separator: ", "))"
@@ -540,7 +675,8 @@ enum DebugSessionArtifacts {
                 urls.append(paths.backup)
             }
         case .inject:
-            urls += RuntimeGamePaths(game: game, runtimeSettings: runtimeSettings).injectRuntimeFiles
+            let gamePaths = RuntimeGamePaths(game: game, runtimeSettings: runtimeSettings)
+            urls += gamePaths.injectRuntimeFiles + gamePaths.debugTraceFiles
         }
         return uniqueURLs(urls)
     }
