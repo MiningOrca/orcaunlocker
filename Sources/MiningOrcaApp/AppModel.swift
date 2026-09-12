@@ -903,7 +903,11 @@ final class LauncherAppModel: ObservableObject {
         diagnosticLogError = nil
         operationState = .debugRunning
 
-        let endReason = try await waitForDebugSessionEnd(game: game)
+        let sessionEnd = try await waitForDebugSessionEnd(
+            game: game,
+            steamAPITargets: debugState.steamAPITargetURLs
+        )
+        let endReason = sessionEnd.reason
 
         // Give the process a brief moment to flush final buffered log lines after
         // it disappears from the process table before freezing the artifacts.
@@ -918,7 +922,8 @@ final class LauncherAppModel: ObservableObject {
                 game: game,
                 installLog: installLog,
                 transport: transport,
-                debugState: debugState
+                debugState: debugState,
+                processObservations: sessionEnd.processObservations
             )
         }.value
         return (endReason, capture)
@@ -1032,21 +1037,37 @@ final class LauncherAppModel: ObservableObject {
         return finalized.archiveURL
     }
 
-    private func waitForDebugSessionEnd(game: SteamGame) async throws -> DebugSessionEndReason {
+    private func waitForDebugSessionEnd(
+        game: SteamGame,
+        steamAPITargets: [URL]
+    ) async throws -> (reason: DebugSessionEndReason, processObservations: [DebugProcessObservation]) {
         let inactivityLimit: TimeInterval = 10 * 60
         var sawGameProcess = false
         var previousGameProcessRunning: Bool?
         var previousLogFingerprint: DebugLogFingerprint?
         var lastLogActivity = Date()
+        var observedPIDs = Set<Int32>()
+        var processObservations: [DebugProcessObservation] = []
 
         while !Task.isCancelled {
             if debugStopRequested {
-                return .stopped
+                return (.stopped, processObservations)
             }
 
             let pulse = try await Task.detached(priority: .utility) {
                 try LauncherCore.load().debugSessionPulse(game: game)
             }.value
+
+            for identity in pulse.processes where observedPIDs.insert(identity.pid).inserted {
+                let observation = try await Task.detached(priority: .utility) {
+                   try LauncherCore.load().inspectDebugProcess(
+                        identity,
+                        game: game,
+                        steamAPITargets: steamAPITargets
+                    )
+                }.value
+                processObservations.append(observation)
+            }
 
             if previousGameProcessRunning != pulse.gameProcessRunning {
                 previousGameProcessRunning = pulse.gameProcessRunning
@@ -1055,7 +1076,7 @@ final class LauncherAppModel: ObservableObject {
             if pulse.gameProcessRunning {
                 sawGameProcess = true
             } else if sawGameProcess {
-                return .gameExited
+                return (.gameExited, processObservations)
             }
 
             let fingerprint = pulse.logFingerprint
@@ -1069,13 +1090,13 @@ final class LauncherAppModel: ObservableObject {
             previousLogFingerprint = fingerprint
 
             if Date().timeIntervalSince(lastLogActivity) >= inactivityLimit {
-                return .logInactive
+                return (.logInactive, processObservations)
             }
 
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
-        return .stopped
+        return (.stopped, processObservations)
     }
 
     private func formatLauncherLog(appID: UInt32,

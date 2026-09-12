@@ -3,17 +3,27 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME_DIR="${1:-${ORCAUNLOCKER_RUNTIME_DIR:-}}"
+
 DIST_DIR="$ROOT/dist"
 APP_NAME="Orca Unlocker"
 APP="$DIST_DIR/$APP_NAME.app"
 ZIP="$DIST_DIR/Orca-Unlocker-macOS.zip"
+
 VERSION="${ORCAUNLOCKER_VERSION:-0.1.0}"
 BUILD_NUMBER="${ORCAUNLOCKER_BUILD:-1}"
 BUNDLE_ID="${ORCAUNLOCKER_BUNDLE_ID:-com.orcaunlocker.app}"
+
 ICON_SOURCE="${ORCAUNLOCKER_ICON:-$ROOT/icons/orca_icon.png}"
 ICON_NAME="OrcaUnlocker.icns"
+
 BANNER_SOURCE="$ROOT/icons/orca_banner.png"
 BANNER_NAME="orca_banner.png"
+
+DEFAULT_SETTINGS_SOURCE="$ROOT/Sources/MiningOrcaLauncherCore/Resources/default-settings.json"
+
+#
+# Validate inputs.
+#
 
 if [[ -z "$RUNTIME_DIR" ]]; then
   echo "Usage: $0 /path/to/runtime" >&2
@@ -33,12 +43,16 @@ fi
 
 if [[ ! -f "$ICON_SOURCE" ]]; then
   echo "App icon is missing: $ICON_SOURCE" >&2
-  echo "Place orca_icon.png in the repository root or set ORCAUNLOCKER_ICON." >&2
   exit 1
 fi
 
 if [[ ! -f "$BANNER_SOURCE" ]]; then
   echo "Banner artwork is missing: $BANNER_SOURCE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$DEFAULT_SETTINGS_SOURCE" ]]; then
+  echo "Default settings are missing: $DEFAULT_SETTINGS_SOURCE" >&2
   exit 1
 fi
 
@@ -59,9 +73,18 @@ fi
 
 cd "$ROOT"
 
+#
+# Build binaries.
+#
+
 "$ROOT/scripts/build-helper.sh"
-swift build -c release --product OrcaUnlockerApp
+
+swift build \
+  -c release \
+  --product OrcaUnlockerApp
+
 BIN_DIR="$(swift build -c release --show-bin-path)"
+
 APP_EXECUTABLE="$BIN_DIR/OrcaUnlockerApp"
 HELPER_EXECUTABLE="$ROOT/helper/target/release/miningorca-steam-helper"
 
@@ -75,17 +98,30 @@ if [[ ! -x "$HELPER_EXECUTABLE" ]]; then
   exit 1
 fi
 
+#
+# Prepare application bundle.
+#
+
 ICONSET="$DIST_DIR/OrcaUnlocker.iconset"
 
-rm -rf "$APP" "$ZIP" "$ICONSET"
+rm -rf \
+  "$APP" \
+  "$ZIP" \
+  "$ICONSET"
+
 mkdir -p \
   "$APP/Contents/MacOS" \
   "$APP/Contents/Resources/Runtime" \
   "$ICONSET"
 
+#
+# Generate application icon.
+#
+
 make_icon() {
   local pixels="$1"
   local filename="$2"
+
   /usr/bin/sips \
     -s format png \
     -z "$pixels" "$pixels" \
@@ -108,15 +144,39 @@ make_icon 1024 icon_512x512@2x.png
   -c icns \
   "$ICONSET" \
   -o "$APP/Contents/Resources/$ICON_NAME"
+
 rm -rf "$ICONSET"
 
-cp "$APP_EXECUTABLE" "$APP/Contents/MacOS/OrcaUnlocker"
-cp "$HELPER_EXECUTABLE" "$APP/Contents/MacOS/miningorca-steam-helper"
+#
+# Install application files.
+#
+
 cp \
-  "$ROOT/Sources/MiningOrcaLauncherCore/Resources/default-settings.json" \
+  "$APP_EXECUTABLE" \
+  "$APP/Contents/MacOS/OrcaUnlocker"
+
+cp \
+  "$HELPER_EXECUTABLE" \
+  "$APP/Contents/MacOS/miningorca-steam-helper"
+
+# Packaged application resources are loaded through Bundle.main.
+cp \
+  "$DEFAULT_SETTINGS_SOURCE" \
   "$APP/Contents/Resources/default-settings.json"
-cp "$BANNER_SOURCE" "$APP/Contents/Resources/$BANNER_NAME"
-cp -R "$RUNTIME_DIR/." "$APP/Contents/Resources/Runtime/"
+
+cp \
+  "$BANNER_SOURCE" \
+  "$APP/Contents/Resources/$BANNER_NAME"
+
+# Runtime artifacts must remain byte-for-byte identical to the
+# Mineshaft release because manifest hashes describe these files.
+cp -R \
+  "$RUNTIME_DIR/." \
+  "$APP/Contents/Resources/Runtime/"
+
+#
+# Info.plist.
+#
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -125,26 +185,37 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleDisplayName</key>
     <string>Orca Unlocker</string>
+
     <key>CFBundleExecutable</key>
     <string>OrcaUnlocker</string>
+
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
+
     <key>CFBundleIconFile</key>
     <string>$ICON_NAME</string>
+
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+
     <key>CFBundleName</key>
     <string>Orca Unlocker</string>
+
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+
     <key>CFBundleShortVersionString</key>
     <string>$VERSION</string>
+
     <key>CFBundleVersion</key>
     <string>$BUILD_NUMBER</string>
+
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
+
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
+
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
@@ -155,19 +226,77 @@ chmod +x \
   "$APP/Contents/MacOS/OrcaUnlocker" \
   "$APP/Contents/MacOS/miningorca-steam-helper"
 
-/usr/bin/plutil -lint "$APP/Contents/Info.plist" >/dev/null
+#
+# Validate packaged resources before signing.
+#
 
-# Runtime artifacts are copied byte-for-byte because manifest hashes describe
-# those exact files. Signing/mutating runtime dylibs belongs in their pipeline.
-/usr/bin/codesign --force --sign - "$APP/Contents/MacOS/miningorca-steam-helper"
-/usr/bin/codesign --force --sign - "$APP"
-/usr/bin/codesign --verify --strict "$APP"
+/usr/bin/plutil \
+  -lint \
+  "$APP/Contents/Info.plist" >/dev/null
+
+if [[ ! -f "$APP/Contents/Resources/default-settings.json" ]]; then
+  echo "Packaged default-settings.json is missing." >&2
+  exit 1
+fi
+
+if [[ ! -f "$APP/Contents/Resources/$BANNER_NAME" ]]; then
+  echo "Packaged banner is missing." >&2
+  exit 1
+fi
+
+if [[ ! -f "$APP/Contents/Resources/Runtime/manifest.json" ]]; then
+  echo "Packaged runtime manifest is missing." >&2
+  exit 1
+fi
+
+#
+# Runtime artifacts are copied byte-for-byte because manifest hashes
+# describe those exact files.
+#
+# Do not sign or otherwise mutate runtime dylibs here.
+#
+
+/usr/bin/codesign \
+  --force \
+  --sign - \
+  "$APP/Contents/MacOS/miningorca-steam-helper"
+
+#
+# Sign and seal the application.
+#
+
+/usr/bin/codesign \
+  --force \
+  --sign - \
+  "$APP"
+
+#
+# Verify final bundle.
+#
+
+/usr/bin/codesign \
+  --verify \
+  --strict \
+  --verbose=2 \
+  "$APP"
+
+#
+# Package ZIP.
+#
 
 /usr/bin/ditto \
-  -c -k --sequesterRsrc --keepParent \
+  -c -k \
+  --sequesterRsrc \
+  --keepParent \
   "$APP" \
   "$ZIP"
 
+/usr/bin/unzip \
+  -tq \
+  "$ZIP"
+
 echo
-echo "App: $APP"
-echo "ZIP: $ZIP"
+echo "App:     $APP"
+echo "ZIP:     $ZIP"
+echo "Version: $VERSION"
+echo "Build:   $BUILD_NUMBER"

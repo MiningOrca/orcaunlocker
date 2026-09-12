@@ -45,8 +45,9 @@ struct InjectTransportCleaner {
             metadata: ["app_id": "\(game.appID)"]
         )
         let paths = RuntimeGamePaths(game: game, runtimeSettings: runtimeSettings)
+        let removableFiles = paths.injectRuntimeFiles + paths.debugTraceFiles
         try paths.requireSafeRuntimePaths(
-            paths.injectRuntimeFiles,
+            removableFiles,
             fileSystem: fileSystem
         )
         let launchResult = try launchOptions.removeHooks(
@@ -57,7 +58,7 @@ struct InjectTransportCleaner {
         )
 
         var removedFiles = false
-        for url in paths.injectRuntimeFiles {
+        for url in removableFiles {
             removedFiles = try fileSystem.removeItemIfExists(url) || removedFiles
         }
         try fileSystem.removeDirectoryIfEmpty(paths.runtimeDirectory)
@@ -186,8 +187,20 @@ struct InjectInstaller {
             )
         }
         try codeSigning.verify(stagedDylib)
-        try writeWrapper(stagedPrefixWrapper, dylib: gamePaths.injectDylib)
-        try writeWrapper(stagedCommandWrapper, dylib: gamePaths.injectDylib)
+        try writeWrapper(
+            stagedPrefixWrapper,
+            dylib: gamePaths.injectDylib,
+            launchTrace: gamePaths.injectLaunchTrace,
+            earlyRuntimeLog: gamePaths.earlyRuntimeLog,
+            diagnosticsEnabled: profile == .debug
+        )
+        try writeWrapper(
+            stagedCommandWrapper,
+            dylib: gamePaths.injectDylib,
+            launchTrace: gamePaths.injectLaunchTrace,
+            earlyRuntimeLog: gamePaths.earlyRuntimeLog,
+            diagnosticsEnabled: profile == .debug
+        )
 
         LauncherLog.logger.info(
             "Committing Inject runtime files",
@@ -235,7 +248,7 @@ struct InjectInstaller {
             for url in gamePaths.injectRuntimeFiles {
                 try? fileSystem.removeItem(at: url)
             }
-            try? fileSystem.removeDirectoryIfEmpty(gamePaths.runtimeDirectory)
+            _ = try? fileSystem.removeDirectoryIfEmpty(gamePaths.runtimeDirectory)
             throw error
         }
     }
@@ -250,14 +263,49 @@ struct InjectInstaller {
         )
     }
 
-    private func writeWrapper(_ url: URL, dylib: URL) throws {
+    private func writeWrapper(
+        _ url: URL,
+        dylib: URL,
+        launchTrace: URL,
+        earlyRuntimeLog: URL,
+        diagnosticsEnabled: Bool
+    ) throws {
         let quotedDylib = shellSingleQuote(dylib.path)
+        let diagnosticPrelude: String
+
+        if diagnosticsEnabled {
+            let quotedLaunchTrace = shellSingleQuote(launchTrace.path)
+            let quotedEarlyRuntimeLog = shellSingleQuote(earlyRuntimeLog.path)
+            diagnosticPrelude = """
+LAUNCH_TRACE=\(quotedLaunchTrace)
+EARLY_RUNTIME_LOG=\(quotedEarlyRuntimeLog)
+
+{
+    printf '%s\\n' '--- wrapper invocation ---'
+    printf 'timestamp=%s\\n' "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'wrapper=%q\\n' "$0"
+    printf 'pid=%s\\n' "$$"
+    printf 'ppid=%s\\n' "$PPID"
+    printf 'cwd=%q\\n' "$PWD"
+    printf 'argv_count=%s\\n' "$#"
+    ARG_INDEX=0
+    for ARG_VALUE in "$@"; do
+        printf 'argv[%d]=%q\\n' "$ARG_INDEX" "$ARG_VALUE"
+        ARG_INDEX=$((ARG_INDEX + 1))
+    done
+    printf 'DYLD_INSERT_LIBRARIES_before=%q\\n' "${DYLD_INSERT_LIBRARIES:-}"
+} >> "$LAUNCH_TRACE" 2>&1 || true
+"""
+        } else {
+            diagnosticPrelude = ""
+        }
+
         let script = """
 #!/bin/bash
 set -euo pipefail
 
 TRACE_DYLIB=\(quotedDylib)
-
+\(diagnosticPrelude)
 if [ "$#" -lt 1 ]; then
     echo "[orcaunlocker] ERROR: Steam did not pass %command%" >&2
     exit 64
@@ -271,11 +319,30 @@ if [ -n "${DYLD_INSERT_LIBRARIES:-}" ]; then
     DYLD_VALUE="$TRACE_DYLIB:$DYLD_INSERT_LIBRARIES"
 fi
 
+if [ -n "${LAUNCH_TRACE:-}" ]; then
+    {
+        printf 'launch_target=%q\\n' "$LAUNCH_TARGET"
+        printf 'DYLD_INSERT_LIBRARIES_after=%q\\n' "$DYLD_VALUE"
+    } >> "$LAUNCH_TRACE" 2>&1 || true
+fi
+
 if [ -d "$LAUNCH_TARGET" ] && [[ "$LAUNCH_TARGET" == *.app ]]; then
-    exec /usr/bin/open -W \\
-        --env "DYLD_INSERT_LIBRARIES=$DYLD_VALUE" \\
-        "$LAUNCH_TARGET" \\
-        --args "$@"
+    if [ -n "${LAUNCH_TRACE:-}" ]; then
+        BUNDLE_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$LAUNCH_TARGET/Contents/Info.plist" 2>/dev/null || true)"
+        {
+            printf '%s\\n' 'launch_kind=app_bundle'
+            if [ -n "$BUNDLE_EXECUTABLE" ]; then
+                printf 'resolved_executable=%q\\n' "$LAUNCH_TARGET/Contents/MacOS/$BUNDLE_EXECUTABLE"
+            else
+                printf '%s\\n' 'resolved_executable=(unknown)'
+            fi
+        } >> "$LAUNCH_TRACE" 2>&1 || true
+    fi
+
+    if [ -n "${EARLY_RUNTIME_LOG:-}" ]; then
+        exec /usr/bin/open -W --env "DYLD_INSERT_LIBRARIES=$DYLD_VALUE" --env "ORCAUNLOCKER_EARLY_LOG=$EARLY_RUNTIME_LOG" "$LAUNCH_TARGET" --args "$@"
+    fi
+    exec /usr/bin/open -W --env "DYLD_INSERT_LIBRARIES=$DYLD_VALUE" "$LAUNCH_TARGET" --args "$@"
 fi
 
 if [ ! -f "$LAUNCH_TARGET" ]; then
@@ -283,7 +350,17 @@ if [ ! -f "$LAUNCH_TARGET" ]; then
     exit 66
 fi
 
+if [ -n "${LAUNCH_TRACE:-}" ]; then
+    {
+        printf '%s\\n' 'launch_kind=executable'
+        printf 'resolved_executable=%q\\n' "$LAUNCH_TARGET"
+    } >> "$LAUNCH_TRACE" 2>&1 || true
+fi
+
 export DYLD_INSERT_LIBRARIES="$DYLD_VALUE"
+if [ -n "${EARLY_RUNTIME_LOG:-}" ]; then
+    export ORCAUNLOCKER_EARLY_LOG="$EARLY_RUNTIME_LOG"
+fi
 cd "$(dirname "$LAUNCH_TARGET")"
 exec "$LAUNCH_TARGET" "$@"
 """
