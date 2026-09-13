@@ -87,29 +87,241 @@ fi
 cd "$ROOT"
 
 #
-# Build binaries.
+# Build universal binaries.
+#
+# SwiftPM's multi-architecture build path currently depends on Xcode's
+# build system. Build the two macOS slices independently instead, then
+# combine them with lipo. This keeps the release build working with the
+# standalone Swift/Command Line Tools setup as well.
 #
 
-"$ROOT/scripts/build-helper.sh"
+BUILD_TMP="$(mktemp -d "${TMPDIR:-/tmp}/orcaunlocker-build.XXXXXX")"
 
-swift build \
-  -c release \
-  --product OrcaUnlockerApp
+cleanup() {
+  rm -rf "$BUILD_TMP"
+  if [[ -n "${ICONSET:-}" ]]; then
+    rm -rf "$ICONSET"
+  fi
+}
+trap cleanup EXIT
 
-BIN_DIR="$(swift build -c release --show-bin-path)"
+require_universal() {
+  local path="$1"
+  local label="$2"
+  local archs
 
-APP_EXECUTABLE="$BIN_DIR/OrcaUnlockerApp"
-HELPER_EXECUTABLE="$ROOT/helper/target/release/miningorca-steam-helper"
+  if [[ ! -f "$path" ]]; then
+    echo "$label is missing: $path" >&2
+    exit 1
+  fi
 
-if [[ ! -x "$APP_EXECUTABLE" ]]; then
-  echo "App executable is missing: $APP_EXECUTABLE" >&2
+  archs="$(/usr/bin/lipo -archs "$path" 2>/dev/null)" || {
+    echo "$label is not a Mach-O universal binary: $path" >&2
+    exit 1
+  }
+
+  if [[ " $archs " != *" arm64 "* || " $archs " != *" x86_64 "* ]]; then
+    echo "$label is not universal arm64+x86_64: $archs" >&2
+    exit 1
+  fi
+
+  echo "[build-app] $label architectures: $archs"
+}
+
+find_rustup() {
+  if command -v rustup >/dev/null 2>&1; then
+    command -v rustup
+    return 0
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    local prefix
+    prefix="$(brew --prefix rustup 2>/dev/null || true)"
+    if [[ -n "$prefix" && -x "$prefix/bin/rustup" ]]; then
+      echo "$prefix/bin/rustup"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+build_universal_helper() {
+  # Keep the existing helper build script as the authoritative native build.
+  "$ROOT/scripts/build-helper.sh"
+
+  local native_helper="$ROOT/helper/target/release/miningorca-steam-helper"
+  local output="$BUILD_TMP/miningorca-steam-helper"
+  local native_archs missing_target cross_helper
+
+  if [[ ! -x "$native_helper" ]]; then
+    echo "Steam helper is missing: $native_helper" >&2
+    exit 1
+  fi
+
+  native_archs="$(/usr/bin/lipo -archs "$native_helper" 2>/dev/null)" || {
+    echo "Steam helper is not a Mach-O executable: $native_helper" >&2
+    exit 1
+  }
+
+  if [[ " $native_archs " == *" arm64 "* && " $native_archs " == *" x86_64 "* ]]; then
+    cp "$native_helper" "$output"
+    chmod +x "$output"
+    HELPER_EXECUTABLE="$output"
+    require_universal "$HELPER_EXECUTABLE" "Steam helper"
+    return 0
+  fi
+
+  case "$native_archs" in
+    *arm64*)
+      missing_target="x86_64-apple-darwin"
+      ;;
+    *x86_64*)
+      missing_target="aarch64-apple-darwin"
+      ;;
+    *)
+      echo "Unexpected Steam helper architecture: $native_archs" >&2
+      exit 1
+      ;;
+  esac
+
+  local rustup_bin=""
+  local rust_toolchain="${ORCAUNLOCKER_RUST_TOOLCHAIN:-stable}"
+  local toolchain_cargo=""
+  local toolchain_rustc=""
+  local toolchain_bin=""
+  local target_libdir=""
+
+  if rustup_bin="$(find_rustup)"; then
+    echo "[build-app] Ensuring Rust toolchain '$rust_toolchain' and target '$missing_target'..."
+    "$rustup_bin" toolchain install "$rust_toolchain" --profile minimal >/dev/null
+    "$rustup_bin" target add --toolchain "$rust_toolchain" "$missing_target" >/dev/null
+
+    # Do not use `rustup run ... cargo` here. With Homebrew's keg-only rustup
+    # and a separate Homebrew `rust` installation, `cargo` can still resolve
+    # to the system Cargo/Rust compiler pair. That compiler does not see the
+    # stdlib installed into rustup's toolchain and fails with E0463.
+    # Resolve the toolchain binaries explicitly and force Cargo to use the
+    # matching rustc.
+    toolchain_cargo="$("$rustup_bin" which --toolchain "$rust_toolchain" cargo)"
+    toolchain_rustc="$("$rustup_bin" which --toolchain "$rust_toolchain" rustc)"
+    toolchain_bin="$(dirname "$toolchain_cargo")"
+
+    if [[ ! -x "$toolchain_cargo" || ! -x "$toolchain_rustc" ]]; then
+      echo "Unable to resolve Rust toolchain binaries for '$rust_toolchain'." >&2
+      exit 1
+    fi
+
+    target_libdir="$("$toolchain_rustc" --print target-libdir --target "$missing_target")"
+    if [[ ! -d "$target_libdir" ]]; then
+      echo "Rust target stdlib is still missing after rustup target add: $missing_target" >&2
+      echo "Expected target libdir: $target_libdir" >&2
+      exit 1
+    fi
+  else
+    # Homebrew's `rust` formula does not ship additional target stdlibs.
+    # Fail before the expensive Swift builds instead of letting cargo emit a
+    # long series of E0463 errors.
+    cat >&2 <<EOF
+Rust target '$missing_target' is required to build the universal Steam helper,
+but rustup is not installed.
+
+Install rustup once and rerun the build:
+
+  brew install rustup
+
+The build script will discover Homebrew's keg-only rustup automatically and
+install the required Rust target. It will not replace your system Rust setup.
+EOF
+    exit 1
+  fi
+
+  echo "[build-app] Building Steam helper for $missing_target..."
+
+  local -a cargo_args=(
+    build
+    --manifest-path "$ROOT/helper/Cargo.toml"
+    --release
+    --target "$missing_target"
+  )
+
+  if [[ -f "$ROOT/helper/Cargo.lock" ]]; then
+    cargo_args+=(--locked)
+  fi
+
+  PATH="$toolchain_bin:$PATH" \
+  RUSTC="$toolchain_rustc" \
+    "$toolchain_cargo" "${cargo_args[@]}"
+
+  cross_helper="$ROOT/helper/target/$missing_target/release/miningorca-steam-helper"
+
+  if [[ ! -x "$cross_helper" ]]; then
+    echo "Cross-compiled Steam helper is missing: $cross_helper" >&2
+    exit 1
+  fi
+
+  /usr/bin/lipo \
+    -create \
+    "$native_helper" \
+    "$cross_helper" \
+    -output "$output"
+
+  chmod +x "$output"
+  HELPER_EXECUTABLE="$output"
+  require_universal "$HELPER_EXECUTABLE" "Steam helper"
+}
+
+build_swift_slice() {
+  local triple="$1"
+  local scratch="$2"
+
+  echo "[build-app] Building OrcaUnlockerApp for $triple..." >&2
+
+  swift build \
+    -c release \
+    --triple "$triple" \
+    --scratch-path "$scratch" \
+    --product OrcaUnlockerApp >&2
+
+  swift build \
+    -c release \
+    --triple "$triple" \
+    --scratch-path "$scratch" \
+    --show-bin-path
+}
+
+# Build/validate the helper first. If the Rust cross target is unavailable,
+# fail immediately instead of spending two minutes building both Swift slices.
+build_universal_helper
+
+SWIFT_ARM64_SCRATCH="$BUILD_TMP/swift-arm64"
+SWIFT_X86_64_SCRATCH="$BUILD_TMP/swift-x86_64"
+
+ARM64_BIN_DIR="$(build_swift_slice arm64-apple-macosx "$SWIFT_ARM64_SCRATCH")"
+X86_64_BIN_DIR="$(build_swift_slice x86_64-apple-macosx "$SWIFT_X86_64_SCRATCH")"
+
+ARM64_APP_EXECUTABLE="$ARM64_BIN_DIR/OrcaUnlockerApp"
+X86_64_APP_EXECUTABLE="$X86_64_BIN_DIR/OrcaUnlockerApp"
+APP_EXECUTABLE="$BUILD_TMP/OrcaUnlockerApp"
+
+if [[ ! -x "$ARM64_APP_EXECUTABLE" ]]; then
+  echo "arm64 app executable is missing: $ARM64_APP_EXECUTABLE" >&2
   exit 1
 fi
 
-if [[ ! -x "$HELPER_EXECUTABLE" ]]; then
-  echo "Steam helper is missing: $HELPER_EXECUTABLE" >&2
+if [[ ! -x "$X86_64_APP_EXECUTABLE" ]]; then
+  echo "x86_64 app executable is missing: $X86_64_APP_EXECUTABLE" >&2
   exit 1
 fi
+
+/usr/bin/lipo \
+  -create \
+  "$ARM64_APP_EXECUTABLE" \
+  "$X86_64_APP_EXECUTABLE" \
+  -output "$APP_EXECUTABLE"
+
+chmod +x "$APP_EXECUTABLE"
+require_universal "$APP_EXECUTABLE" "Orca Unlocker launcher"
 
 #
 # Prepare application bundle.
@@ -285,6 +497,27 @@ if [[ ! -f "$APP/Contents/Resources/Licenses/Mineshaft-NOTICE.txt" ]]; then
 fi
 
 #
+# Verify final packaged architectures before signing.
+#
+
+require_universal "$APP/Contents/MacOS/OrcaUnlocker" "Packaged Orca Unlocker launcher"
+require_universal "$APP/Contents/MacOS/miningorca-steam-helper" "Packaged Steam helper"
+
+RUNTIME_DYLIB_COUNT=0
+for runtime_dylib in "$APP/Contents/Resources/Runtime/"*.dylib; do
+  if [[ ! -f "$runtime_dylib" ]]; then
+    continue
+  fi
+  RUNTIME_DYLIB_COUNT=$((RUNTIME_DYLIB_COUNT + 1))
+  require_universal "$runtime_dylib" "Runtime $(basename "$runtime_dylib")"
+done
+
+if [[ "$RUNTIME_DYLIB_COUNT" -eq 0 ]]; then
+  echo "No runtime dylibs were packaged." >&2
+  exit 1
+fi
+
+#
 # Runtime artifacts are copied byte-for-byte because manifest hashes
 # describe those exact files.
 #
@@ -312,6 +545,14 @@ fi
 /usr/bin/codesign \
   --verify \
   --strict \
+  --all-architectures \
+  --verbose=2 \
+  "$APP/Contents/MacOS/miningorca-steam-helper"
+
+/usr/bin/codesign \
+  --verify \
+  --strict \
+  --all-architectures \
   --verbose=2 \
   "$APP"
 
