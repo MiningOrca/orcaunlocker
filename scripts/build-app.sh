@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME_DIR="${1:-${ORCAUNLOCKER_RUNTIME_DIR:-}}"
 
+LICENSE_SOURCE="$ROOT/LICENSE.md"
+MINESHAFT_NOTICE_SOURCE="$ROOT/docs/legal/MINESHAFT-NOTICE.txt"
+
 DIST_DIR="$ROOT/dist"
 APP_NAME="Orca Unlocker"
 APP="$DIST_DIR/$APP_NAME.app"
@@ -35,6 +38,16 @@ RUNTIME_DIR="$(cd "$RUNTIME_DIR" 2>/dev/null && pwd)" || {
   echo "Runtime directory does not exist: $RUNTIME_DIR" >&2
   exit 1
 }
+
+if [[ ! -f "$LICENSE_SOURCE" ]]; then
+  echo "License is missing: $LICENSE_SOURCE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$MINESHAFT_NOTICE_SOURCE" ]]; then
+  echo "Mineshaft notice is missing: $MINESHAFT_NOTICE_SOURCE" >&2
+  exit 1
+fi
 
 if [[ ! -f "$RUNTIME_DIR/manifest.json" ]]; then
   echo "Runtime manifest is missing: $RUNTIME_DIR/manifest.json" >&2
@@ -112,6 +125,7 @@ rm -rf \
 mkdir -p \
   "$APP/Contents/MacOS" \
   "$APP/Contents/Resources/Runtime" \
+  "$APP/Contents/Resources/Licenses" \
   "$ICONSET"
 
 #
@@ -154,6 +168,14 @@ rm -rf "$ICONSET"
 cp \
   "$APP_EXECUTABLE" \
   "$APP/Contents/MacOS/OrcaUnlocker"
+
+cp \
+  "$LICENSE_SOURCE" \
+  "$APP/Contents/Resources/Licenses/OrcaUnlocker-LICENSE.md"
+
+cp \
+  "$MINESHAFT_NOTICE_SOURCE" \
+  "$APP/Contents/Resources/Licenses/Mineshaft-NOTICE.txt"
 
 cp \
   "$HELPER_EXECUTABLE" \
@@ -213,6 +235,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
 
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 MiningOrca</string>
+
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
 
@@ -246,6 +271,16 @@ fi
 
 if [[ ! -f "$APP/Contents/Resources/Runtime/manifest.json" ]]; then
   echo "Packaged runtime manifest is missing." >&2
+  exit 1
+fi
+
+if [[ ! -f "$APP/Contents/Resources/Licenses/OrcaUnlocker-LICENSE.md" ]]; then
+  echo "Packaged Orca Unlocker license is missing." >&2
+  exit 1
+fi
+
+if [[ ! -f "$APP/Contents/Resources/Licenses/Mineshaft-NOTICE.txt" ]]; then
+  echo "Packaged Mineshaft notice is missing." >&2
   exit 1
 fi
 
