@@ -1,0 +1,7 @@
+Mineshaft Runtime Components
+
+Copyright (c) 2026 MiningOrca. All rights reserved.
+
+The Mineshaft runtime components included with Orca Unlocker are
+proprietary software and are not licensed under the PolyForm
+Noncommercial License applicable to Orca Unlocker.
